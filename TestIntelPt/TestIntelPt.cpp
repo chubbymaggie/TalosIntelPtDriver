@@ -68,7 +68,7 @@ int main()
 	PROCESS_INFORMATION pi = { 0 };
 
 
-#pragma region A fucking useless DEBUG code section
+#pragma region DEBUG code section
 	// Some DEBUG checks
 	TOPA_TABLE_ENTRY tableEntry = { 0 };
 	dwBytesIo = sizeof(tableEntry);
@@ -76,14 +76,13 @@ int main()
 	tableEntry.Fields.BaseAddr = 0x123456789ABC;
 	tableEntry.Fields.End = 1;
 
-	// Dbeug check 2
+	// Debug check 2
 	MSR_IA32_PERF_GLOBAL_STATUS_DESC globalStatus = { 0 };
 	globalStatus.Fields.TraceToPAPMI = 1;
 	globalStatus.Fields.PMC7_OVF = 1;
 	globalStatus.Fields.FIXED_CTR1 = 1;
 	globalStatus.Fields.Ovf_Buffer = 1;
 	#pragma endregion
-
 
 	GetModuleFileName(GetModuleHandle(NULL), lpPtDumpFile, MAX_PATH);
 	LPTSTR slashPtr = wcsrchr(lpPtDumpFile, L'\\');
@@ -178,7 +177,7 @@ int main()
 	CloseHandle(pi.hProcess); 
 	CloseHandle(pi.hThread);
 
-	// Don't forget to do this (otherwise a big BSOD will appear):
+	// Don't forget to clear the trace buffer otherwise we will bugcheck
 	bRetVal = DeviceIoControl(hPtDev, IOCTL_PTDRV_CLEAR_TRACE, (LPVOID)&dwTargetCpu, sizeof(DWORD), NULL, 0, &dwBytesIo, NULL);
 	CloseHandle(hPtDev);
 

@@ -2,25 +2,15 @@
 *   Intel Processor Trace Driver
 *	Filename: IntelPt.cpp
 *	Defines the Intel Processor Trace driver function prototypes
-*	Last revision: 08/15/2016
+*	Last revision: 10/07/2016
 *
 *   Copyright© 2016 Andrea Allievi, Richard Johnson
-*	TALOS Research and Intelligence Group
+* 	Microsoft Ltd & TALOS Research and Intelligence Group
 *	All right reserved
 **********************************************************************/
-
 #pragma once
 
 typedef long NTSTATUS;
-struct GLOBAL_DATA {
-	HANDLE hTraceFile;							// The trace file handle
-	HANDLE hPtDev;								// The handle to the Intel PT device
-	HANDLE hTargetProc;							// The traced process handle
-	LPBYTE lpPtBuff;							// The Trace buffer
-	DWORD dwTraceSize;							// The trace size in BYTES
-	HANDLE hExitEvt;							// The handle to the exit event
-	PT_TRACE_STRUCT currentTrace;
-};
 
 #pragma pack(1)
 struct INTEL_PT_CAPABILITIES {
@@ -81,12 +71,6 @@ union TOPA_TABLE_ENTRY {
 	ULONGLONG All;
 };
 #pragma pack()
-
-// Check the Intel Processor Trace support on this processor
-BOOL CheckIntelPtSupport(INTEL_PT_CAPABILITIES * lpPtCap);
-
-// The PMI interrupt Thread 
-DWORD WINAPI PmiThreadProc(LPVOID lpParameter);
 
 // Undocumented Win32 APIs
 extern "C" NTSTATUS ZwResumeProcess(HANDLE hProcess);

@@ -2,10 +2,10 @@
  *	Intel Processor Trace Driver
  *	Filename: Intel_Defs.h
  *	Intel Processor Trace definitions and data structures
- *	Last revision: 08/15/2016
+ *	Last revision: 10/07/2016
  *
- *	Copyright© 2016 Andrea Allievi, Richard Johnson
- *	TALOS Research and Intelligence Group
+ *  Copyright© 2016 Andrea Allievi, Richard Johnson
+ *	TALOS Research and Intelligence Group and Microsoft Ltd
  *	All right reserved
  **********************************************************************/
 #pragma once
@@ -27,6 +27,11 @@
 #define MSR_IA32_RTIT_ADDR0_END			0x00000581
 #define MSR_IA32_RTIT_ADDR1_START		0x00000582
 #define MSR_IA32_RTIT_ADDR1_END			0x00000583
+#define MSR_IA32_RTIT_ADDR2_START		0x00000584
+#define MSR_IA32_RTIT_ADDR2_END			0x00000585
+#define MSR_IA32_RTIT_ADDR3_START		0x00000586
+#define MSR_IA32_RTIT_ADDR3_END			0x00000587
+
 
 // The maximum physical address (set to 48 bit)
 #define MAXPHYADDR 48

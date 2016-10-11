@@ -2,10 +2,10 @@
  *  Intel Processor Trace Driver
  * 	Filename: DriverIo.cpp
  *	Implements the I/O communication between the Driver and the User App
- *	Last revision: 08/15/2016
+ *	Last revision: 10/07/2016
  *
  *  Copyright© 2016 Andrea Allievi, Richard Johnson 
- *  TALOS Research and Intelligence Group
+ * 	Microsoft Ltd & TALOS Research and Intelligence Group
  *	All right reserved
  **********************************************************************/
 
@@ -84,55 +84,59 @@ NTSTATUS DeviceIoControl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 			INTEL_PT_CAPABILITIES ptCap = { 0 };
 			ntStatus = CheckIntelPtSupport(&ptCap);
 
-			if (dwOutBuffSize >= sizeof(INTEL_PT_CAPABILITIES)) 
-			{
+			if (dwOutBuffSize >= sizeof(INTEL_PT_CAPABILITIES)) {
 				RtlCopyMemory(pIrp->AssociatedIrp.SystemBuffer, &ptCap, sizeof(INTEL_PT_CAPABILITIES));
 				pIrp->IoStatus.Information = sizeof(INTEL_PT_CAPABILITIES);
-			}
-			else
-			{
+			} else {
 				ntStatus = STATUS_NOT_IMPLEMENTED;
 			}
-			
 			break;
 		}
 
 		// Start a particular process trace
 		case IOCTL_PTDRV_START_TRACE: 
 		{
-			// Input buffer:  a PT_TRACE_STRUCT that describes the tracing information
+			// Input buffer:  a PT_USER_REQ that describes the tracing information
 			// Output buffer: a pointer to the new physical buffer that contains the trace
-			PT_TRACE_STRUCT * ptTraceStruct = NULL;
+			PT_USER_REQ * ptTraceStruct = NULL;
+			PEPROCESS epTarget = NULL;				// Target EPROCESS (if any)
 			lpInBuff = pIrp->AssociatedIrp.SystemBuffer;
 			lpOutBuff = pIrp->AssociatedIrp.SystemBuffer;
 
-			if (dwInBuffSize < sizeof(PT_TRACE_STRUCT)) 
-			{
+			if (dwInBuffSize < sizeof(PT_USER_REQ)) {
 				ntStatus = STATUS_INVALID_BUFFER_SIZE;
 				break;
 			}
-			ptTraceStruct = (PPT_TRACE_STRUCT)lpInBuff;
+			ptTraceStruct = (PT_USER_REQ*)lpInBuff;
 
 			dwTargetCpu = ptTraceStruct->dwCpuId;
-			if (dwTargetCpu == (ULONG)-1) 
-			{
+			if (dwTargetCpu == (ULONG)-1) {
 				// XXX: Tracing all processes is currently not implemented
 				ntStatus = STATUS_NOT_IMPLEMENTED;
 				break;
-			}
-			else if (dwTargetCpu >= dwNumOfCpus) 
-			{
+			} else if (dwTargetCpu >= dwNumOfCpus) {
 				ntStatus = STATUS_INVALID_PARAMETER;
 				break;
 			}
 
-			// Grab the EPROCESS structure
-			PEPROCESS epTarget = NULL;
-			ntStatus = PsLookupProcessByProcessId((HANDLE)ptTraceStruct->dwProcessId, &epTarget);
-			if (!NT_SUCCESS(ntStatus)) 
-			{
-				ntStatus = STATUS_INVALID_PARAMETER;
-				break;
+			// Grab the EPROCESS structure (if any)
+			if (ptTraceStruct->dwProcessId > 0) {
+				ntStatus = PsLookupProcessByProcessId((HANDLE)ptTraceStruct->dwProcessId, &epTarget);
+				if (!NT_SUCCESS(ntStatus)) {
+					ntStatus = STATUS_INVALID_PARAMETER;
+					break;
+				}
+			}
+			// Verify here that the ranges are correct
+			int iNumOfRanges = ptTraceStruct->IpFiltering.dwNumOfRanges;
+			if (iNumOfRanges >= 4) { ntStatus = STATUS_INVALID_PARAMETER; break; }
+			for (int i = 0; i < iNumOfRanges; i++) {
+				PT_TRACE_IP_FILTERING & filterDesc = ptTraceStruct->IpFiltering;
+				if ((ULONG_PTR)filterDesc.Ranges[i].lpStartVa > (ULONG_PTR)MmHighestUserAddress ||
+					(ULONG_PTR)filterDesc.Ranges[i].lpEndVa > (ULONG_PTR)MmHighestUserAddress) {
+					ntStatus = STATUS_INVALID_PARAMETER;
+					break;
+				}
 			}
 
 			// Round up buffer size to be page aligned
@@ -144,7 +148,7 @@ NTSTATUS DeviceIoControl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 			KeInitializeEvent(&pIpiDpcStruct->kEvt, SynchronizationEvent, FALSE);
 			KeInitializeDpc(pkDpc, IoCpuIpiDpc, (PVOID)pIpiDpcStruct);
 			KeSetTargetProcessorDpc(pkDpc, (CCHAR)dwTargetCpu);
-			KeInsertQueueDpc(pkDpc, (PVOID)epTarget, (LPVOID)ptTraceStruct); // Method-Buffered: passing ptTraceStruct is safe
+			KeInsertQueueDpc(pkDpc, (LPVOID)ptTraceStruct, (LPVOID)epTarget); // Method-Buffered: passing ptTraceStruct is safe
 
 			// Wait for the DPC to do its job
 			KeWaitForSingleObject((PVOID)&pIpiDpcStruct->kEvt, Executive, KernelMode, FALSE, NULL);
@@ -207,8 +211,7 @@ NTSTATUS DeviceIoControl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 			// Method buffered 
 			lpInBuff = pIrp->AssociatedIrp.SystemBuffer;
 
-			if (dwInBuffSize < sizeof(DWORD))
-			{
+			if (dwInBuffSize < sizeof(DWORD)) {
 				ntStatus = STATUS_INVALID_BUFFER_SIZE;
 				break;
 			}
@@ -219,16 +222,13 @@ NTSTATUS DeviceIoControl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 				//TODO: tracing all processors currently not implemented
 				ntStatus = STATUS_NOT_IMPLEMENTED;
 				break;
-			}
-			else if (dwTargetCpu >= dwNumOfCpus) 
-			{
+			} else if (dwTargetCpu >= dwNumOfCpus) {
 				ntStatus = STATUS_INVALID_PARAMETER;
 				break;
 			}
 
 			// Try to unmap the user-mode buffer (this will fail if called from within the traced process)
-			if (NT_SUCCESS(ntStatus)) 
-			{
+			if (NT_SUCCESS(ntStatus)) {
 				PER_PROCESSOR_PT_DATA * pPtData = &g_pDrvData->procData[dwTargetCpu];
 				if (pPtData->lpUserVa)
 					ntStatus = UnmapTraceBuffToUserVa(dwTargetCpu);
@@ -256,15 +256,13 @@ NTSTATUS DeviceIoControl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 			lpOutBuff = pIrp->AssociatedIrp.SystemBuffer;	// Output buffer: PT_TRACE_DETAILS structure
 
 			// Parameters check
-			if (dwInBuffSize < sizeof(DWORD) || dwOutBuffSize < sizeof(PT_TRACE_DETAILS)) 
-			{
+			if (dwInBuffSize < sizeof(DWORD) || dwOutBuffSize < sizeof(PT_TRACE_DETAILS)) {
 				ntStatus = STATUS_INVALID_BUFFER_SIZE;
 				break;
 			}
 
 			dwTargetCpu = *((DWORD*)lpInBuff);
-			if (dwTargetCpu >= dwNumOfCpus) 
-			{
+			if (dwTargetCpu >= dwNumOfCpus) {
 				ntStatus = STATUS_INVALID_PARAMETER;
 				break;
 			}
@@ -287,6 +285,8 @@ NTSTATUS DeviceIoControl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 			details.dwCpuId = dwTargetCpu;
 			details.dwTraceBuffSize = (DWORD)cpuData.qwBuffSize;
 			details.qwTotalNumberOfPackets = cpuData.PacketByteCount;
+			details.IpFiltering.dwNumOfRanges = cpuData.dwNumOfActiveRanges;
+			RtlCopyMemory(details.IpFiltering.Ranges, cpuData.IpRanges, cpuData.dwNumOfActiveRanges * sizeof(details.IpFiltering.Ranges[0]));
 
 			RtlCopyMemory(lpOutBuff, &details, sizeof(PT_TRACE_DETAILS));
 			pIrp->IoStatus.Information = sizeof(PT_TRACE_DETAILS);
@@ -308,11 +308,15 @@ NTSTATUS DeviceIoControl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 
 #pragma code_seg(".nonpaged")
 // DPC routine (needed to start/stop/pause the PT on a target CPU)
-VOID IoCpuIpiDpc(struct _KDPC *Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2) 
+/* Arguments explanation:
+ *   DeferredContext - Pointer to a structure that describe the DPC itself
+ *   SysArg1 - the structure that describe the operation 
+ *   SysArg2 - Any data that is not related to the DPC but can not acquired at DISPATCH_LEVEL.Ususally is the pointer to the target process. */
+VOID IoCpuIpiDpc(struct _KDPC *Dpc, PVOID DeferredContext, PVOID SysArg1, PVOID SysArg2)
 {
 	UNREFERENCED_PARAMETER(Dpc);
 	IPI_DPC_STRUCT * pIpiDpcStruct = (IPI_DPC_STRUCT*)DeferredContext;
-	PT_TRACE_STRUCT * ptTraceStruct = NULL;
+	PT_USER_REQ * ptTraceUserStruct = NULL;
 	DWORD dwCpuId = KeGetCurrentProcessorNumber();
 	NTSTATUS ntStatus = STATUS_SUCCESS;
 
@@ -320,30 +324,35 @@ VOID IoCpuIpiDpc(struct _KDPC *Dpc, PVOID DeferredContext, PVOID SystemArgument1
 
 	switch (pIpiDpcStruct->Type) 
 	{
-		case DPC_TYPE_START_PT: 
-		{
+		case DPC_TYPE_START_PT: {
 			TRACE_OPTIONS opts = { 0 };
-			ptTraceStruct = (PT_TRACE_STRUCT*)SystemArgument2;
-			PEPROCESS pTargetProc = (PEPROCESS)SystemArgument1;
-			if (ptTraceStruct->dwOptsMask) 
-			{
-				opts.All = ptTraceStruct->dwOptsMask;
-
+			ptTraceUserStruct = (PT_USER_REQ*)SysArg1;
+			PEPROCESS pTargetProc = (PEPROCESS)SysArg2;
+			if (ptTraceUserStruct->dwOptsMask)	{
+				// Analyse here the trace options if any
+				opts.All = ptTraceUserStruct->dwOptsMask;
 				ntStatus = SetTraceOptions(dwCpuId, opts);
-				if (!NT_SUCCESS(ntStatus)) 
-					break;
+				if (!NT_SUCCESS(ntStatus)) break;
 			}
-			ntStatus = StartProcessTrace(pTargetProc, (QWORD)ptTraceStruct->dwTraceSize);
+
+			// Build the PT_TRACE_DESC structure and translate the PT_USER_REQ structure
+			PT_TRACE_DESC ptDesc = { 0 };
+			ptDesc.bTraceKernel = FALSE;
+			ptDesc.peProc = pTargetProc;
+			ptDesc.dwNumOfRanges = ptTraceUserStruct->IpFiltering.dwNumOfRanges;
+			if (ptDesc.dwNumOfRanges)
+				RtlCopyMemory(ptDesc.Ranges, ptTraceUserStruct->IpFiltering.Ranges, sizeof(PT_TRACE_RANGE) * 4);
+
+			// Do not check here the filtering range, we trust the input, we have checked it before (See DriverIo dispatch function)
+			ntStatus = StartProcessTrace(ptDesc, (QWORD)ptTraceUserStruct->dwTraceSize);
 			break;
 		}
-		case DPC_TYPE_PAUSE_PT: 
-		{
-			BOOLEAN bPause = (BOOLEAN)SystemArgument1;
+		case DPC_TYPE_PAUSE_PT: {
+			BOOLEAN bPause = (BOOLEAN)SysArg1;
 			ntStatus = PauseResumeTrace(bPause);
 			break;
 		}
-		case DPC_TYPE_CLEAR_PT: 
-		{
+		case DPC_TYPE_CLEAR_PT: {
 			ntStatus = StopAndDisablePt();
 			FreePtResources();
 			break;

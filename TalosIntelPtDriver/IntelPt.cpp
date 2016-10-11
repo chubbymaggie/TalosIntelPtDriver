@@ -2,10 +2,10 @@
 *   Intel Processor Trace Driver
 *	Filename: IntelPt.cpp
 *	Implement the Intel Processor Trace driver
-*	Last revision: 08/15/2016
+*	Last revision: 10/07/2016
 *
 *   Copyright© 2016 Andrea Allievi, Richard Johnson
-*	TALOS Research and Intelligence Group
+*	TALOS Research and Intelligence Group and Microsoft Ltd
 *	All right reserved
 **********************************************************************/
 
@@ -62,7 +62,7 @@ NTSTATUS CheckIntelPtSupport(INTEL_PT_CAPABILITIES * lpPtCap)
 }
 
 // Enable the Intel PT trace for current processor
-NTSTATUS StartProcessTrace(PEPROCESS pTargetEproc, QWORD qwBuffSize) 
+NTSTATUS StartProcessTrace(PT_TRACE_DESC desc, QWORD qwBuffSize)
 {
 	NTSTATUS ntStatus = STATUS_NOT_SUPPORTED;				// Returned NTSTATUS value
 	INTEL_PT_CAPABILITIES ptCap = { 0 };					// The per-processor PT capabilities
@@ -77,49 +77,64 @@ NTSTATUS StartProcessTrace(PEPROCESS pTargetEproc, QWORD qwBuffSize)
 	MSR_RTIT_STATUS_DESC rtitStatusDesc = { 0 };
 	MSR_RTIT_OUTPUTBASE_DESC rtitOutBaseDesc = { 0 };
 	MSR_RTIT_OUTPUT_MASK_PTRS_DESC rtitOutMasksDesc = { 0 };
-
-	if (!pTargetEproc) return STATUS_INVALID_PARAMETER;
+	if (!qwBuffSize) return STATUS_INVALID_PARAMETER_2;
 
 	ntStatus = CheckIntelPtSupport(&ptCap);
 	if (!NT_SUCCESS(ntStatus)) return ntStatus;
 
-	if (!ptCap.bSingleRangeSupport) return STATUS_NOT_SUPPORTED;
-	if (!ptCap.bCr3Filtering) return STATUS_NOT_SUPPORTED;	
+	// Check here the support based on the Trace structure
+	if (desc.peProc != NULL)
+		// Check the support for CR3 filtering
+		if (!ptCap.bCr3Filtering) return STATUS_NOT_SUPPORTED;
+	if (desc.dwNumOfRanges > 0) {
+		if (!ptCap.bIpFiltering) return STATUS_NOT_SUPPORTED;
+		if (desc.dwNumOfRanges > 4) return STATUS_INVALID_PARAMETER_1;
+		if (ptCap.numOfAddrRanges < desc.dwNumOfRanges) return STATUS_NOT_SUPPORTED;
+	}
+	// Now check the output mode
+	if (!ptCap.bSingleRangeSupport && !ptCap.bTopaOutput) return STATUS_NOT_SUPPORTED;
 
 	// To proper read the value of the CR3 register of a target process, the KiSwapProcess routines does this:
 	// From KTHREAD go to ETHREAD, then use the ApcState field to return back to a EPROCESS
 	// Finally grab it from peProc->DirectoryTableBase (offset + 0x28) 
-	targetCr3 = ((ULONG_PTR *)pTargetEproc)[5];
+	if (desc.peProc) {
+		targetCr3 = ((ULONG_PTR *)desc.peProc)[5];
+		// Check the found target CR3 (it should have the last 12 bits set to 0, due to the PFN standard)
+		if ((targetCr3 & 0xFFF) != 0) return STATUS_INVALID_ADDRESS;
+		DbgPrint("[TalosIntelPT] Starting Intel Processor Trace for processor %i. Target CR3: 0x%llX\r\n", curProcId, targetCr3);
+	}
+	else
+		DbgPrint("[TalosIntelPT] Starting Intel Processor Trace for processor %i. Tracing ALL user mode processes...\r\n", curProcId);
 
-	// Check the found target CR3 (it should have the last 12 bits set to 0, due to the PFN standard)
-	if ((targetCr3 & 0xFFF) != 0) return STATUS_INVALID_ADDRESS;
-	DbgPrint("[TalosIntelPT] Starting Intel Processor Trace for processor %i. Target CR3: 0x%llX\r\n", curProcId, targetCr3);
-	
+
+	// Initially set up all the descriptor data in the Per-processor control structure
 	lpProcPtData = &g_pDrvData->procData[curProcId];
 	lpProcPtData->lpTargetProcCr3 = targetCr3;
-	lpProcPtData->lpTargetProc = pTargetEproc;
-
-	// Set the default trace options if needed
-	if (lpProcPtData->TraceOptions.All == 0)
-	{
-		lpProcPtData->TraceOptions.Fields.bTraceBranchPcks = TRUE;
-		lpProcPtData->TraceOptions.Fields.bUseTopa = TRUE;
+	lpProcPtData->lpTargetProc = desc.peProc;
+	if (desc.dwNumOfRanges) {
+		RtlZeroMemory(lpProcPtData->IpRanges, sizeof(lpProcPtData->IpRanges));
+		RtlCopyMemory(lpProcPtData->IpRanges, desc.Ranges, desc.dwNumOfRanges * sizeof(PT_TRACE_RANGE));
+		lpProcPtData->dwNumOfActiveRanges = desc.dwNumOfRanges;
 	}
 
-	//Step 0. Allocate the pysical continuous memory
-	if (!qwBuffSize) return STATUS_INVALID_PARAMETER_2;
+	// Set the default trace options if needed
+	if (lpProcPtData->TraceOptions.All == 0) {
+		lpProcPtData->TraceOptions.Fields.bTraceBranchPcks = TRUE;
+		lpProcPtData->TraceOptions.Fields.bUseTopa = TRUE;
+		lpProcPtData->TraceOptions.Fields.bEnableRetCompression = TRUE;
+	}
+
+	//Step 0. Allocate the pysical memory
 	if (!lpProcPtData->qwBuffSize || lpProcPtData->qwBuffSize != qwBuffSize)
 	{
 		BOOLEAN bUseTopa = (lpProcPtData->TraceOptions.Fields.bUseTopa == 1);
-
 		ntStatus = AllocPtBuffer(qwBuffSize, bUseTopa);
-		if (!NT_SUCCESS(ntStatus)) 
-		{
+		if (!NT_SUCCESS(ntStatus)) {
 			DbgPrint("[TalosIntelPT] Error: unable to allocate the trace buffer.\r\n");
 			lpProcPtData->lpTargetProcCr3 = NULL;
+			lpProcPtData->lpTargetProc = NULL;
 			return STATUS_INVALID_PARAMETER_2;
 		}
-
 		bBuffAllocated = TRUE;
 	}
 
@@ -168,16 +183,55 @@ NTSTATUS StartProcessTrace(PEPROCESS pTargetEproc, QWORD qwBuffSize)
 		__writemsr(MSR_IA32_RTIT_OUTPUT_MASK_PTRS, rtitOutMasksDesc.All);
 	}
 
-	// Set the page table filter for the target process 
-	__writemsr(MSR_IA32_RTIT_CR3_MATCH, (ULONGLONG)targetCr3);
-
-	// Set the TRACE options
+	// Set the TRACE options:
 	TRACE_OPTIONS & options = lpProcPtData->TraceOptions;
-	rtitCtlDesc.Fields.CR3Filter = 1;
 	rtitCtlDesc.Fields.FabricEn = 0;
 	rtitCtlDesc.Fields.Os = 0;								// XXX: Currently hardcoding single usermode process tracing
 	rtitCtlDesc.Fields.User = 1;							// Trace the user mode process
 	rtitCtlDesc.Fields.BranchEn = options.Fields.bTraceBranchPcks;
+
+	if (lpProcPtData->lpTargetProcCr3) {
+		// Set the page table filter for the target process 
+		__writemsr(MSR_IA32_RTIT_CR3_MATCH, (ULONGLONG)targetCr3);
+		rtitCtlDesc.Fields.CR3Filter = 1;
+	}
+	else {
+		// Set the register to 0
+		__writemsr(MSR_IA32_RTIT_CR3_MATCH, 0);
+		rtitCtlDesc.Fields.CR3Filter = 0;
+	}
+
+	// Set the IP range flags and registers to 0 
+	rtitCtlDesc.Fields.Addr0Cfg = 0;
+	rtitCtlDesc.Fields.Addr1Cfg = 0;
+	rtitCtlDesc.Fields.Addr2Cfg = 0;
+	rtitCtlDesc.Fields.Addr3Cfg = 0;
+
+	// Now set them to the proper values (see Intel Manuals, chapter 36.2.5.2 - IA32_RTIT_CTL MSR)
+	if (lpProcPtData->dwNumOfActiveRanges > 0) {
+		if (lpProcPtData->IpRanges[0].bStopTrace) rtitCtlDesc.Fields.Addr0Cfg = 2;
+		else rtitCtlDesc.Fields.Addr0Cfg = 1;
+		__writemsr(MSR_IA32_RTIT_ADDR0_START, (QWORD)lpProcPtData->IpRanges[0].lpStartVa);
+		__writemsr(MSR_IA32_RTIT_ADDR0_END, (QWORD)lpProcPtData->IpRanges[0].lpEndVa);
+	}
+	if (lpProcPtData->dwNumOfActiveRanges > 1) {
+		if (lpProcPtData->IpRanges[1].bStopTrace) rtitCtlDesc.Fields.Addr1Cfg = 2;
+		else rtitCtlDesc.Fields.Addr1Cfg = 1;
+		__writemsr(MSR_IA32_RTIT_ADDR1_START, (QWORD)lpProcPtData->IpRanges[1].lpStartVa);
+		__writemsr(MSR_IA32_RTIT_ADDR1_END, (QWORD)lpProcPtData->IpRanges[1].lpEndVa);
+	}
+	if (lpProcPtData->dwNumOfActiveRanges > 2) {
+		if (lpProcPtData->IpRanges[2].bStopTrace) rtitCtlDesc.Fields.Addr2Cfg = 2;
+		else rtitCtlDesc.Fields.Addr2Cfg = 1;
+		__writemsr(MSR_IA32_RTIT_ADDR2_START, (QWORD)lpProcPtData->IpRanges[2].lpStartVa);
+		__writemsr(MSR_IA32_RTIT_ADDR2_END, (QWORD)lpProcPtData->IpRanges[2].lpEndVa);
+	}
+	if (lpProcPtData->dwNumOfActiveRanges > 3) {
+		if (lpProcPtData->IpRanges[3].bStopTrace) rtitCtlDesc.Fields.Addr3Cfg = 2;
+		else rtitCtlDesc.Fields.Addr3Cfg = 1;
+		__writemsr(MSR_IA32_RTIT_ADDR3_START, (QWORD)lpProcPtData->IpRanges[3].lpStartVa);
+		__writemsr(MSR_IA32_RTIT_ADDR3_END, (QWORD)lpProcPtData->IpRanges[3].lpEndVa);
+	}
 
 	if (ptCap.bMtcSupport) 
 	{
@@ -211,8 +265,7 @@ NTSTATUS StartProcessTrace(PEPROCESS pTargetEproc, QWORD qwBuffSize)
 	if (kOldIrql < DISPATCH_LEVEL)
 		KeLowerIrql(kOldIrql);
 
-	if (rtitStatusDesc.Fields.TriggerEn) 
-	{
+	if (rtitStatusDesc.Fields.TriggerEn) {
 		DbgPrint("[TalosIntelPT] Successfully enabled Intel PT tracing for processor %i. Log Virtual Address: 0x%llX. :-)\r\n", 
 			curProcId, lpProcPtData->bUseTopa ? lpProcPtData->u.ToPA.lpTopaVa : lpProcPtData->u.Simple.lpTraceBuffVa);
 		lpProcPtData->curState = PT_PROCESSOR_STATE_TRACING;
@@ -226,14 +279,18 @@ NTSTATUS StartProcessTrace(PEPROCESS pTargetEproc, QWORD qwBuffSize)
 		lpProcPtData->curState = PT_PROCESSOR_STATE_ERROR;
 		lpProcPtData->lpTargetProc = NULL;
 		lpProcPtData->lpTargetProcCr3 = NULL;
+		lpProcPtData->dwNumOfActiveRanges = 0;
+		RtlZeroMemory(lpProcPtData->IpRanges, sizeof(lpProcPtData->IpRanges));
 		return STATUS_UNSUCCESSFUL;
 	}
 }
 
+// Start the Tracing of a particular USER-MODE process (No IP-Filtering or whatever) 
 NTSTATUS StartProcessTrace(DWORD dwProcId, DWORD dwBuffSize) 
 {
 	NTSTATUS ntStatus = 0;
 	PEPROCESS peProc = NULL;
+	PT_TRACE_DESC ptDesc = { 0 };				// The kernel tracing data structure
 
 	// PsLookupProcessByProcessId should be executed at IRQL < DISPATCH_LEVEL
 	ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);				
@@ -241,8 +298,13 @@ NTSTATUS StartProcessTrace(DWORD dwProcId, DWORD dwBuffSize)
 
 	if (!NT_SUCCESS(ntStatus)) 
 		return ntStatus;
-	else 
-		return StartProcessTrace(peProc, dwBuffSize);
+	else {
+		// Compose the right data structure and pass the control to the main function
+		ptDesc.bTraceKernel = FALSE;
+		ptDesc.dwNumOfRanges = 0;
+		ptDesc.peProc = peProc;
+		return StartProcessTrace(ptDesc, (QWORD)dwBuffSize);
+	}
 }
 
 // Put the tracing in PAUSE mode
@@ -267,23 +329,20 @@ NTSTATUS PauseResumeTrace(BOOLEAN bPause)
 
 	// XXX: This seems unnecessary 
 	// Update the STATUS register 
-	if (rtitCtlDesc.Fields.TraceEn == 0) 
-	{
+	if (rtitCtlDesc.Fields.TraceEn == 0) {
 		rtitStatusDesc.Fields.Stopped = 0;
 		rtitStatusDesc.Fields.Error = 0;
 		__writemsr(MSR_IA32_RTIT_STATUS, rtitStatusDesc.All);
 	}
 
-	if (bPause)
-	{
+	if (bPause)	{
 		// Pause Intel PT tracing 
 		rtitCtlDesc.Fields.TraceEn = 0;
 	}
 	else 
 	{
 		// If we paused to dump buffer lets reset it 
-		if (curCpuData.bUseTopa && curCpuData.bBuffIsFull) 
-		{
+		if (curCpuData.bUseTopa && curCpuData.bBuffIsFull) {
 			// Restore the Topa Buffer, Set the proc_trace_table_base
 			rtitOutBaseDesc.All = (ULONGLONG)curCpuData.u.ToPA.lpTopaPhysAddr;
 			__writemsr(MSR_IA32_RTIT_OUTPUT_BASE, rtitOutBaseDesc.All);
@@ -313,14 +372,12 @@ NTSTATUS PauseResumeTrace(BOOLEAN bPause)
 	// Read the final status
 	rtitStatusDesc.All = __readmsr(MSR_IA32_RTIT_STATUS);
 	
-	if (rtitStatusDesc.Fields.Error) 
-	{
+	if (rtitStatusDesc.Fields.Error) {
 		curCpuData.curState = PT_PROCESSOR_STATE_ERROR;
 		return STATUS_UNSUCCESSFUL;
 	}
 
-	if (bPause) 
-	{
+	if (bPause) {
 		// Copy and reset the current number of packets
 		curCpuData.PacketByteCount += (QWORD)rtitStatusDesc.Fields.PacketByteCnt;
 		rtitStatusDesc.Fields.PacketByteCnt = 0;
@@ -337,6 +394,7 @@ NTSTATUS PauseResumeTrace(BOOLEAN bPause)
 NTSTATUS StopAndDisablePt() 
 {
 	NTSTATUS ntStatus = STATUS_NOT_SUPPORTED;				// Returned NTSTATUS value
+	INTEL_PT_CAPABILITIES ptCap = { 0 };					// Intel Processor Tracing capabilities
 	PER_PROCESSOR_PT_DATA * lpProcPtData = NULL;			// The per processor data structure
 	MSR_RTIT_CTL_DESC rtitCtlDesc = { 0 };
 	MSR_RTIT_STATUS_DESC rtitStatusDesc = { 0 };			// The Status MSR descriptor
@@ -347,7 +405,7 @@ NTSTATUS StopAndDisablePt()
 	dwCurProc = KeGetCurrentProcessorNumber();
 	lpProcPtData = &g_pDrvData->procData[dwCurProc];
 
-	ntStatus = CheckIntelPtSupport(NULL);
+	ntStatus = CheckIntelPtSupport(&ptCap);
 	if (!NT_SUCCESS(ntStatus)) return ntStatus;
 
 	// Stop and disable the Intel PT
@@ -362,10 +420,29 @@ NTSTATUS StopAndDisablePt()
 	// Reset all the configuration registers
 	__writemsr(MSR_IA32_RTIT_OUTPUT_BASE, 0);
 	__writemsr(MSR_IA32_RTIT_OUTPUT_MASK_PTRS, 0);
-	__writemsr(MSR_IA32_RTIT_CR3_MATCH, 0);
+	if (ptCap.numOfAddrRanges > 0) {
+		__writemsr(MSR_IA32_RTIT_ADDR0_START, 0);
+		__writemsr(MSR_IA32_RTIT_ADDR0_END, 0);
+	}
+	if (ptCap.numOfAddrRanges > 1) {
+		__writemsr(MSR_IA32_RTIT_ADDR1_START, 0);
+		__writemsr(MSR_IA32_RTIT_ADDR1_END, 0);
+	}
+	if (ptCap.numOfAddrRanges > 2) {
+		__writemsr(MSR_IA32_RTIT_ADDR2_START, 0);
+		__writemsr(MSR_IA32_RTIT_ADDR2_END, 0);
+	}
+	if (ptCap.numOfAddrRanges > 3) {
+		__writemsr(MSR_IA32_RTIT_ADDR3_START, 0);
+		__writemsr(MSR_IA32_RTIT_ADDR3_END, 0);
+	}
+	if (ptCap.bCr3Filtering)
+		__writemsr(MSR_IA32_RTIT_CR3_MATCH, 0);
 
 	lpProcPtData->lpTargetProcCr3 = NULL;
 	lpProcPtData->lpTargetProc = NULL;
+	lpProcPtData->dwNumOfActiveRanges = 0;
+	RtlZeroMemory(lpProcPtData->IpRanges, sizeof(lpProcPtData->IpRanges));
 
 	lpProcPtData->curState = PT_PROCESSOR_STATE_STOPPED;
 	return STATUS_SUCCESS;
@@ -439,15 +516,12 @@ NTSTATUS AllocPtBuffer(QWORD qwSize, BOOLEAN bUseToPA)
 	if (!bUseToPA && !ptCap.bSingleRangeSupport)
 		return STATUS_NOT_SUPPORTED;
 
-	if (bUseToPA) 
-	{
+	if (bUseToPA) {
 		if (perCpuData.u.ToPA.lpTopaPhysAddr) ntStatus = FreePtResources();
 		if (!NT_SUCCESS(ntStatus)) return ntStatus;
 		// Table of Physical Address usage
 		ntStatus = AllocAndSetCpuTopa(dwCurCpu, qwSize);
-	}
-	else 
-	{
+	} else 	{
 		if (perCpuData.u.Simple.lpTraceBuffVa) ntStatus = FreePtResources();
 		if (!NT_SUCCESS(ntStatus)) return ntStatus;
 
@@ -494,18 +568,14 @@ NTSTATUS FreePtResources()
 		if (perCpuData.lpMappedProc)
 			dwTargetPid = (DWORD)PsGetProcessId(perCpuData.lpMappedProc);
 		
-		if ((!dwTargetPid || dwTargetPid == dwCurProcId) && kIrql <= APC_LEVEL) 
-		{
+		if ((!dwTargetPid || dwTargetPid == dwCurProcId) && kIrql <= APC_LEVEL) {
 			// We can safely unmap the PT buffer here
 			ntStatus = UnmapTraceBuffToUserVa(dwCurCpu);
-			if (!NT_SUCCESS(ntStatus)) 
-			{
+			if (!NT_SUCCESS(ntStatus)) {
 				DbgPrint("[TalosIntelPT] Error: Unable to unmap the trace buffer for process %i.\r\n", dwTargetPid);
 				return ntStatus;
 			}
-		}
-		else 
-		{
+		} else {
 			DbgPrint("[TalosIntelPT] Warning: Unable to free the the allocated physical memory for processor %i. The process with PID %i has still not unmapped the buffer. "
 				"Base VA: 0x%llX, physical address: 0x%llX.\r\n", dwCurCpu, dwTargetPid, perCpuData.lpUserVa, perCpuData.u.Simple.lpTraceBuffPhysAddr);
 			return STATUS_CONTEXT_MISMATCH;
@@ -514,30 +584,24 @@ NTSTATUS FreePtResources()
 
 	if (perCpuData.bUseTopa) 
 	{
-		// TODO: Change this afterwards
-		if (perCpuData.u.ToPA.lpTopaVa) 
-		{
+		if (perCpuData.u.ToPA.lpTopaVa) {
 			MmFreeContiguousMemory(perCpuData.u.ToPA.lpTopaVa);
 			perCpuData.u.ToPA.lpTopaVa = NULL;
 			perCpuData.u.ToPA.lpTopaPhysAddr = NULL;
 		}
 
-		if (perCpuData.pTraceMdl) 
-		{
+		if (perCpuData.pTraceMdl) {
 			// Free the used pages 
 			MmFreePagesFromMdl(perCpuData.pTraceMdl);
 			ExFreePool(perCpuData.pTraceMdl);
 			perCpuData.pTraceMdl = NULL;
 		}
-	}
-	else 
-	{
+	} else  {
 		// Free the simple output region
 		if (perCpuData.u.Simple.lpTraceBuffVa)
 			MmFreeContiguousMemory(perCpuData.u.Simple.lpTraceBuffVa);
 
-		if (perCpuData.pTraceMdl) 
-		{
+		if (perCpuData.pTraceMdl) {
 			IoFreeMdl(perCpuData.pTraceMdl);
 			perCpuData.pTraceMdl = NULL;
 		}
@@ -583,8 +647,7 @@ NTSTATUS AllocAndSetCpuTopaSlow(DWORD dwCpuId, QWORD qwReqBuffSize)
 	dwTopaSize = ROUND_TO_PAGES(dwTopaSize);
 	pTopa = (TOPA_TABLE_ENTRY *)MmAllocateContiguousMemory(dwTopaSize, highPhysAddr);
 	topaPhysAddr = MmGetPhysicalAddress(pTopa);
-	if (!pTopa) 
-	{
+	if (!pTopa) {
 		MmFreePagesFromMdl(pTraceBuffMdl);
 		ExFreePool(pTraceBuffMdl);
 		return STATUS_INSUFFICIENT_RESOURCES;
@@ -595,7 +658,7 @@ NTSTATUS AllocAndSetCpuTopaSlow(DWORD dwCpuId, QWORD qwReqBuffSize)
 	for (DWORD i = 0; i < dwNumEntriesInMdl; i++) 
 	{
 		pTopa[i].Fields.BaseAddr = pfnArray[i];				// Pfn array contains the PFN offset, not the actual Physical address
-		pTopa[i].Fields.Size = 0; // Encoding: 0 - 4K pages
+		pTopa[i].Fields.Size = 0;		// Encoding: 0 - 4K pages
 	} 
 
 	// LVT interrupt entry
@@ -724,8 +787,7 @@ NTSTATUS RegisterPmiInterrupt()
 	MSR_IA32_APIC_BASE_DESC ApicBase = { 0 };				// In Multi-processors systems this address could change
 	ApicBase.All = __readmsr(MSR_IA32_APIC_BASE);			// In Windows systems all the processors LVT are mapped at the same physical address
 
-	if (!ApicBase.Fields.EXTD) 
-	{
+	if (!ApicBase.Fields.EXTD) 	{
 		LPDWORD lpdwApicBase = NULL;
 		PHYSICAL_ADDRESS apicPhys = { 0 };
 
@@ -733,18 +795,16 @@ NTSTATUS RegisterPmiInterrupt()
 		lpdwApicBase = (LPDWORD)MmMapIoSpace(apicPhys, 0x1000, MmNonCached);
 
 		if (lpdwApicBase) 
-		{
+		{ 
 			DrvDbgPrint("[TalosIntelPT] Successfully mapped the local APIC to 0x%llX.\r\n", lpdwApicBase);
 			g_pDrvData->lpApicBase = lpdwApicBase;
-		}
-		else
+		} else
 			return STATUS_NOT_SUPPORTED;
 
 		// Now read the entry 0x340 (not really needed)
 		g_pDrvData->pmiVectDesc.All = lpdwApicBase[0x340 / 4];
 	}
-	else 
-	{
+	else {
 		// Current system uses x2APIC mode, no need to map anything
 		g_pDrvData->bCpuX2ApicMode = TRUE;
 	}
@@ -756,8 +816,7 @@ NTSTATUS RegisterPmiInterrupt()
 	// Now set the new PMI handler, WARNING: we do not save and restore old handler
 	pNewPmiHandler = IntelPtPmiHandler;
 	ntStatus = HalSetSystemInformation(HalProfileSourceInterruptHandler, sizeof(PMIHANDLER), (LPVOID)&pNewPmiHandler);
-	if (NT_SUCCESS(ntStatus)) 
-	{
+	if (NT_SUCCESS(ntStatus))  {
 		DrvDbgPrint("[TalosIntelPT] Successfully registered system PMI handler to function 0x%llX.\r\n", (LPVOID)pNewPmiHandler);
 		g_pDrvData->bPmiInstalled = TRUE;
 	}
@@ -804,7 +863,7 @@ VOID IntelPtPmiHandler(PKTRAP_FRAME pTrapFrame)
 		return;
 
 	// Pause the Tracing. From Intel's Manual: "Software can minimize the likelihood of the second case by clearing
-	//	TraceEn at the beginning of the PMI handler
+	//	TraceEn at the beginning of the PMI handler"
 	PauseResumeTrace(TRUE);
 	g_pDrvData->procData[dwCurCpu].bBuffIsFull = TRUE;
 
@@ -831,14 +890,11 @@ VOID IntelPtPmiHandler(PKTRAP_FRAME pTrapFrame)
 	{
 		// Check Intel Manuals, Vol. 3A section 10-37
 		ULONGLONG perfMonEntry = __readmsr(MSR_IA32_X2APIC_LVT_PMI);
-		DbgBreak();			// XXX: Please help test this, I do not have a system with the x2Apic mode enabled
 		perfMonDesc.All = (ULONG)perfMonEntry;
 		perfMonDesc.Fields.Masked = 0;
 		perfMonEntry = (ULONGLONG)perfMonDesc.All;
 		__writemsr(MSR_IA32_X2APIC_LVT_PMI, perfMonEntry);
-	}
-	else 
-	{
+	} else {
 		if (!lpdwApicBase)
 			// XXX: Not sure how to continue, No MmMapIoSpace at this IRQL (should not happen)
 			KeBugCheckEx(INTERRUPT_EXCEPTION_NOT_HANDLED, NULL, NULL, NULL, NULL);

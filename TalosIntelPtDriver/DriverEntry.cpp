@@ -31,6 +31,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject, PUNICODE_STRING pRegPath)
 	UNICODE_STRING devNameString = { 0 };					// The I/O device name
 	UNICODE_STRING dosDevNameString = { 0 };				// The DOS device name (User-mode access)
 	PDEVICE_OBJECT pDevObj = NULL;							// The device object
+	INTEL_PT_CAPABILITIES ptCap = { 0 };					// The Intel PT Capabilities for this processor
 
 	// Debbugging helper
 	if ((*KdDebuggerNotPresent) == FALSE)
@@ -48,7 +49,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject, PUNICODE_STRING pRegPath)
 	g_pDrvData->dwNumProcs = dwNumOfProcs;
 
 	// Check PT support
-	ntStatus = CheckIntelPtSupport(&g_pDrvData->ptCapabilities);
+	ntStatus = CheckIntelPtSupport(&ptCap);
 	if (!NT_SUCCESS(ntStatus)) 
 	{
 		DbgPrint("[TalosIntelPT] Intel Processor Tracing is not supported on this system. Exiting...\r\n");
@@ -56,27 +57,29 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject, PUNICODE_STRING pRegPath)
 		ExFreePool(g_pDrvData);
 		return ntStatus;
 	}
+	if (ptCap.numOfAddrRanges < 4) {
+		// Be VERY careful with the following consideration:
+		DbgPrint("[TalosIntelPT] Info: The processor %i supports maximum of %i IP ranges.\r\n", KeGetCurrentProcessorNumber(), ptCap.numOfAddrRanges);
+	}
 
 	// Create a Pmi Event name 
-	CreateSharedPmiEvent(L"TalosIntelPT");			
+	CreateSharedPmiEvent(L"TalosIntelPT");
 	RegisterPmiInterrupt();			// Register the PMI interrupt
 
 	// Build the controller device
 	RtlInitUnicodeString(&devNameString, g_lpDevName);
 	RtlInitUnicodeString(&dosDevNameString, g_lpDosDevName);
 
-	// XXX: require admin to prevent side channel attacks on 3rd party programs
+	// XXX: require admin to prevent side channel attacks on 3rd party programs (IoCreateDeviceSecure)
 	ntStatus = IoCreateDevice(pDriverObject, 0, &devNameString, FILE_DEVICE_UNKNOWN,
 		FILE_DEVICE_SECURE_OPEN, FALSE, &pDevObj);
-
-	if (NT_SUCCESS(ntStatus)) 
-	{
+	
+	if (NT_SUCCESS(ntStatus)) {
 		ntStatus = IoCreateSymbolicLink(&dosDevNameString, &devNameString);
 		g_pDrvData->pMainDev = pDevObj;
 	}
 
-	if (!NT_SUCCESS(ntStatus)) 
-	{
+	if (!NT_SUCCESS(ntStatus)) {
 		if (g_pDrvData->pMainDev) IoDeleteDevice(g_pDrvData->pMainDev);
 		ExFreePool(g_pDrvData);
 		return ntStatus;
@@ -117,8 +120,7 @@ NTSTATUS CreateSharedPmiEvent(LPTSTR lpEvtName)
 		return STATUS_INVALID_PARAMETER;
 
 	// Preliminary buffer checks
-	if (lpEvtName[0] != L'\\') 
-	{
+	if (lpEvtName[0] != L'\\') 	{
 		// Add the trailing "\BasedNamedObject\" (18 chars)
 		if ((dwNameLen + 1 + 18) > COUNTOF(g_pDrvData->pmiEventName))
 			return STATUS_INVALID_BUFFER_SIZE;
@@ -126,20 +128,18 @@ NTSTATUS CreateSharedPmiEvent(LPTSTR lpEvtName)
 		wcscpy_s(newName, COUNTOF(newName), L"\\BaseNamedObjects\\");
 		wcscat_s(newName, COUNTOF(newName), lpEvtName);
 
-	} 
-	else 
-	{
+	} else {
 		if ((dwNameLen + 1) > COUNTOF(g_pDrvData->pmiEventName))
 			return STATUS_INVALID_BUFFER_SIZE;
 
 		wcscpy_s(newName, COUNTOF(newName), lpEvtName);
 	}
 
-	if (g_pDrvData->pPmiEvent) 
-	{
+	if (g_pDrvData->pPmiEvent) {
 		KeResetEvent(g_pDrvData->pPmiEvent);
-		// Delete the object (DO NOT use ExFreePool, th Object Manager has allocated this)
+		// Delete the object (DO NOT use ExFreePool, the Object Manager has allocated this)
 		ObDereferenceObject(g_pDrvData->pPmiEvent);
+		if (g_pDrvData->hPmiEvent) ZwClose(g_pDrvData->hPmiEvent);
 		g_pDrvData->pPmiEvent = NULL;
 		RtlZeroMemory(g_pDrvData->pmiEventName, COUNTOF(g_pDrvData->pmiEventName));
 	}
@@ -150,11 +150,9 @@ NTSTATUS CreateSharedPmiEvent(LPTSTR lpEvtName)
 	// Create the named event
 	ntStatus = ZwCreateEvent(&hEvent, EVENT_ALL_ACCESS, &oa, SynchronizationEvent, FALSE);
 
-	if (NT_SUCCESS(ntStatus)) 
-	{
+	if (NT_SUCCESS(ntStatus)) {
 		ntStatus = ObReferenceObjectByHandle(hEvent, EVENT_ALL_ACCESS, *ExEventObjectType, KernelMode, (PVOID*)&pEvent, NULL);
-		if (NT_SUCCESS(ntStatus)) 
-		{
+		if (NT_SUCCESS(ntStatus)) {
 			RtlCopyMemory(g_pDrvData->pmiEventName, newName, COUNTOF(g_pDrvData->pmiEventName));
 			g_pDrvData->pPmiEvent = pEvent;
 			g_pDrvData->hPmiEvent = hEvent;

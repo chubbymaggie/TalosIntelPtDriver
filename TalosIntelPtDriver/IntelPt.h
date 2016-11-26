@@ -2,10 +2,10 @@
  *  Intel Processor Trace Driver
  *	Filename: IntelPt.cpp
  *	Defines the Intel Processor Trace driver function prototypes
- *	Last revision: 05/06/2016
+ *	Last revision: 10/07/2016
  *
- *	Copyright© 2016 Andrea Allievi, Richard Johnson
- *	TALOS Research and Intelligence Group
+ *  Copyright© 2016 Andrea Allievi, Richard Johnson
+ *	TALOS Research and Intelligence Group and Microsoft Ltd
  *	All right reserved
  **********************************************************************/
 
@@ -36,15 +36,30 @@ enum PT_PROCESSOR_STATE {
 	PT_PROCESSOR_STATE_PAUSED
 };
 
+// Describe a processor trace range
+struct PT_TRACE_RANGE {
+	LPVOID lpStartVa;
+	LPVOID lpEndVa;
+	BOOLEAN bStopTrace;
+};
+
+// Data structure that describe the trace type request
+struct PT_TRACE_DESC {
+	PEPROCESS peProc;						// The Process to trace (if any)
+	DWORD dwNumOfRanges;					// Number of range to trace
+	BOOLEAN bTraceKernel;					// TRUE if I need to trace even Kernel mode components
+	struct PT_TRACE_RANGE Ranges[4];
+};
+
 // The trace options Bitmask
 union TRACE_OPTIONS {
 	struct {
-		BOOLEAN bTraceCycPcks : 1;					// [0] - Enables/disables CYC Packet (default is 0)
-		BOOLEAN bTraceMtcPcks : 1;					// [1] - Enables/disables MTC Packet (default is 0)
-		BOOLEAN bTraceTscPcks : 1;					// [2] - Enables/disables TSC Packet (default is 1)
+		BOOLEAN bTraceCycPcks : 1;					// [0] - Enables/disables CYC Packet (Cycle Count Packet - default is 0)
+		BOOLEAN bTraceMtcPcks : 1;					// [1] - Enables/disables MTC Packet (Wall-clock time packets - default is 0)
+		BOOLEAN bTraceTscPcks : 1;					// [2] - Enables/disables TSC Packet (Time Stamp packets - default is 0)
 		BOOLEAN bTraceBranchPcks : 1;				// [3] - Enables/disables COFI-based packets: FUP, TIP, TIP.PGE, TIP.PGD, TNT, MODE.Exec, MODE.TSX.		(default is 1)
-		BOOLEAN bUseTopa : 1;						// [4] - Enable/disable the usage of Table of Physical Address (if available)
-		BOOLEAN bEnableRetCompression : 1;			// [5] - Enables/disables RET compression (default is 0)
+		BOOLEAN bUseTopa : 1;						// [4] - Enable/disable the usage of Table of Physical Address (if available, default is 1)
+		BOOLEAN bEnableRetCompression : 1;			// [5] - Enables/disables RET compression (default is 1)
 		BOOLEAN Reserved : 2;						// [6:7] - Reserved
 		BYTE MTCFreq : 4;							// [8:11] - MTC packet Frequency, which is based on the core crystal clock, or Always Running Timer (ART)
 		BYTE CycThresh : 4;							// [12:15] - CYC packet threshold. CYC packets will be sent with the first eligible packet after N cycles have passed since the last CYC packet
@@ -70,12 +85,16 @@ struct PER_PROCESSOR_PT_DATA {
 	PMDL pTraceMdl;									// + 0x20 - The MDL used for mapping pages
 	LPVOID lpUserVa;								// + 0x28 - The User Mode VA
 	PEPROCESS lpMappedProc;							// + 0x30 - The process for witch the User VA belongs to (usually the user-mode controlling app)	
-	PEPROCESS lpTargetProc;							// + 0x38 - The target process to monitor
-	ULONG_PTR lpTargetProcCr3;						// + 0x40 - The process to monitor CR3
-	PT_PROCESSOR_STATE curState;					// + 0x48 - Current processor state
-	BOOLEAN bUseTopa;								// + 0x4C - TRUE if this processor uses ToPa
-	BOOLEAN bBuffIsFull;							// + 0x4D - TRUE if the ToPa or Simple buffer is full
-	ULONGLONG PacketByteCount;						// + 0x50 - The total number of TRACE packets acquired by this processor
+	PT_PROCESSOR_STATE curState;					// + 0x38 - Current processor state
+	BOOLEAN bUseTopa;								// + 0x3C - TRUE if this processor uses ToPa
+	BOOLEAN bBuffIsFull;							// + 0x3D - TRUE if the ToPa or Simple buffer is full
+	ULONGLONG PacketByteCount;						// + 0x40 - The total number of TRACE packets acquired by this processor
+
+	// Tracing state data:
+	PEPROCESS lpTargetProc;							// + 0x48 - The target process to monitor (NULL if All process are going to be traced)
+	ULONG_PTR lpTargetProcCr3;						// + 0x50 - The process to monitor CR3 (NULL if All process are going to be traced)
+	DWORD dwNumOfActiveRanges;						// + 0x58 - Number of active ranges
+	PT_TRACE_RANGE IpRanges[4];						// + 0x60
 };
 
 // Define the number of trailing zeroes in a page aligned virtual address.
@@ -88,7 +107,7 @@ struct PER_PROCESSOR_PT_DATA {
 NTSTATUS CheckIntelPtSupport(INTEL_PT_CAPABILITIES * lpPtCap);
 
 // Enable the Intel PT for current processor
-NTSTATUS StartProcessTrace(PEPROCESS pTargetEproc, QWORD qwBuffSize = 0ui64);
+NTSTATUS StartProcessTrace(PT_TRACE_DESC trace_desc, QWORD qwBuffSize = 0ui64);
 NTSTATUS StartProcessTrace(DWORD dwProcId, QWORD qwBuffSize = 0ui64);
 // Disable Intel PT for the current processor
 NTSTATUS StopAndDisablePt();

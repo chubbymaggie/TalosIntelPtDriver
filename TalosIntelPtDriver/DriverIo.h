@@ -2,10 +2,10 @@
  *	Intel Processor Trace Driver
  *	Filename: DriverIo.h
  *	Define the I/O communication between the Driver and the User App
- *	Last revision: 08/15/2016
+ *	Last revision: 10/07/2016
  *
- *	Copyright© 2016 Andrea Allievi, Richard Johnson
- * 	TALOS Research and Intelligence Group
+ *  Copyright© 2016 Andrea Allievi, Richard Johnson
+ *	TALOS Research and Intelligence Group and Microsoft Ltd
  *	All right reserved
  **********************************************************************/
 #pragma once
@@ -17,12 +17,22 @@
 #define PT_ENABLE_TOPA_MASK					(1 << 4)				// Enable / disable the usage of Table of Physical Addresses
 #define PT_ENABLE_RET_COMPRESSION_MASK		(1 << 5)				// Enable / disable RET compression
 
-typedef struct _PT_TRACE_STRUCT {
-	DWORD dwProcessId;						// The target process to trace
+struct PT_TRACE_IP_FILTERING {
+	DWORD dwNumOfRanges;
+	struct {
+		LPVOID lpStartVa;
+		LPVOID lpEndVa;
+		BOOLEAN bStopTrace;
+	} Ranges[4];
+};
+
+typedef struct _PT_USER_REQ {
+	DWORD dwProcessId;						// The target process to trace (0 means ALL)
 	DWORD dwCpuId;							// Target processor ID (-1 means ALL processors)
 	DWORD dwTraceSize;						// TRACE buffer size 
 	DWORD dwOptsMask;						// The trace options bitmask
-} PT_TRACE_STRUCT, * PPT_TRACE_STRUCT;
+	PT_TRACE_IP_FILTERING IpFiltering;		// The IP ranges that we would like to trace (if any)
+} PT_USER_REQ, * PPT_USER_REQ;
 
 enum PT_TRACE_STATE {
 	PT_TRACE_STATE_ERROR = -1,
@@ -36,8 +46,9 @@ typedef struct _PT_TRACE_DETAILS {
 	DWORD dwTargetProcId;					// The target process to trace
 	DWORD dwCpuId;							// Target processor ID
 	DWORD dwTraceBuffSize;					// The Trace buffer size
-	PT_TRACE_STATE dwCurrentTraceState;		// The current tracing state
 	QWORD qwTotalNumberOfPackets;			// The total number of packets acquired until now
+	PT_TRACE_IP_FILTERING IpFiltering;		// The IP ranges that we would like to trace (if any)
+	PT_TRACE_STATE dwCurrentTraceState;		// The current tracing state
 } PT_TRACE_DETAILS, *PPT_TRACE_DETAILS;
 
 #ifndef WIN32

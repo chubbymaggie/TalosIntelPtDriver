@@ -2,10 +2,10 @@
  *  Driver Model 2016
  *	Filename: DriverEntry.h
  *	Implement Driver Entry point and startup functions prototypes
- *	Last revision: 08/15/2016
+ *	Last revision: 10/07/2016
  *
  *  Copyright© 2016 Andrea Allievi, Richard Johnson
- *	TALOS Research and Intelligence Group
+ *	TALOS Research and Intelligence Group and Microsoft Ltd
  *	All right reserved
  **********************************************************************/
 #pragma once
@@ -18,7 +18,6 @@ typedef struct _DRIVER_GLOBAL_DATA {
 	BOOLEAN bPtSupported;								// TRUE if the Intel Pt are supported
 	BOOLEAN bPmiInstalled;								// TRUE if I have correctly installed the PMI Handler routine
 	BOOLEAN bCpuX2ApicMode;								// TRUE if the system processors are in x2Apic Mode
-	INTEL_PT_CAPABILITIES ptCapabilities;				// The Intel Processor Trace capabilities
 	DWORD dwNumProcs;									// The number of the system processors
 	PDEVICE_OBJECT pMainDev;							// The main device object 
 	PMIHANDLER pOldPmiHandler;							// The OLD PMI handler routine (if any)
@@ -28,6 +27,7 @@ typedef struct _DRIVER_GLOBAL_DATA {
 	DWORD * lpApicBase;									// The APIC I/O memory VA
 	LVT_Entry pmiVectDesc;								// The starting PMI LVT Vector descriptor
 	PER_PROCESSOR_PT_DATA procData[ANYSIZE_ARRAY];		// An array of PER_PROCESSOR_PT_DATA structure (1 per processor)
+	// INTEL_PT_CAPABILITIES ptCapabilities;				// The Intel Processor Trace capabilities
 	// PKINTERRUPT pkPmiInterrupt = NULL;				// The PMI Interrupt Object
 }DRIVER_GLOBAL_DATA, *PDRIVER_GLOBAL_DATA;
 extern DRIVER_GLOBAL_DATA * g_pDrvData;

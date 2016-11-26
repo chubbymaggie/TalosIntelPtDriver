@@ -2,10 +2,10 @@
  *  Driver Model 2016
  *	Filename: Debug.h
  *	Implement Driver Debug function prototypes
- *	Last revision: 08/15/2016
+ *	Last revision: 10/07/2016
  *
  *  Copyright© 2016 Andrea Allievi, Richard Johnson
- *	TALOS Research and Intelligence Group
+ *	TALOS Research and Intelligence Group and Microsoft Ltd
  *	All right reserved
  **********************************************************************/
 

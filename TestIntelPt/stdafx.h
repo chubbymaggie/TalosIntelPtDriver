@@ -31,5 +31,15 @@ enum ConsoleColor {
 
 // Set console text Color
 void SetConsoleColor(ConsoleColor c);
+// Get console text Color
+int GetCurrentConsoleColor();
 // Color WPrintf 
 void cl_wprintf(ConsoleColor c, LPTSTR string, LPVOID arg1 = NULL, LPVOID arg2 = NULL, LPVOID arg3 = NULL, LPVOID arg4 = NULL);
+
+#ifdef _DEBUG
+#define DbgBreak() __debugbreak()
+#else
+#define DbgBreak() __noop()
+#endif
+
+#define COUNTOF(x) sizeof(x) / sizeof(x[0])

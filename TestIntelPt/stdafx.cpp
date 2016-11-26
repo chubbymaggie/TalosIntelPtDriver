@@ -68,10 +68,18 @@ void SetConsoleColor(ConsoleColor c){
 	SetConsoleTextAttribute(hCon, c);
 }
 
+int GetCurrentConsoleColor() {
+	HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
+	CONSOLE_SCREEN_BUFFER_INFO con_info;
+	GetConsoleScreenBufferInfo(hCon, &con_info);
+	return con_info.wAttributes;
+}
+
 // Color WPrintf 
 void cl_wprintf(ConsoleColor c, LPTSTR string, LPVOID arg1, LPVOID arg2, LPVOID arg3, LPVOID arg4) {
+	ConsoleColor oldColor = (ConsoleColor)GetCurrentConsoleColor();
 	SetConsoleColor(c);
 	wprintf(string, arg1, arg2, arg3, arg4);
-	SetConsoleColor(GRAY);
+	SetConsoleColor(oldColor);
 }
 #pragma endregion

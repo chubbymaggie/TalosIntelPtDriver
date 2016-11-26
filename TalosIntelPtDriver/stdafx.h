@@ -1,12 +1,14 @@
 /**********************************************************************
- *  Driver Model 2016
+ *  Intel Processor Trace Driver
  *	Filename: stdafx.h
  *	Implement Driver Standard definitions
- *	Last revision: 08/15/2016
+ *	Last revision: 10/07/2016
  *
  *  Copyright© 2016 Andrea Allievi, Richard Johnson
+ *	TALOS Research and Intelligence Group and Microsoft Ltd
  *	All right reserved
  **********************************************************************/
+
 
 #pragma once
 #include <ntddk.h>
